@@ -1,12 +1,14 @@
 import os
+import sys
 import django
 
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'spendwise.settings')
 django.setup()
 
 from django.contrib.auth.models import User
 from core.models import Category, UserProfile, MLInsight, Expense, SavingsGoal, Alert
-from datetime import date, datetime
+from datetime import date
 from decimal import Decimal
 
 print("🌱 Seeding database...")
@@ -32,8 +34,7 @@ for c in categories:
 print(f"  ✅ {len(categories)} categories created")
 
 # ── Test User ─────────────────────────────────────────────
-if User.objects.filter(email='user@gmail.com').exists():
-    User.objects.filter(email='user@gmail.com').delete()
+User.objects.filter(username='testuser').delete()
 
 user = User.objects.create_user(
     username='testuser',
@@ -42,18 +43,19 @@ user = User.objects.create_user(
     first_name='User Name',
 )
 
-profile = user.profile  # auto-created by RegisterSerializer signal
-profile.income_type       = 'salary'
-profile.income_cycle      = 'monthly'
-profile.income_amount     = Decimal('18000')
-profile.next_income_date  = date(2025, 7, 1)
-profile.savings_goal      = Decimal('5000')
-profile.currency          = 'PHP'
+# Manually ensure profile exists (in case signal didn't fire)
+profile, _ = UserProfile.objects.get_or_create(user=user)
+profile.income_type      = 'salary'
+profile.income_cycle     = 'monthly'
+profile.income_amount    = Decimal('18000')
+profile.next_income_date = date(2025, 7, 1)
+profile.savings_goal     = Decimal('5000')
+profile.currency         = 'PHP'
 profile.save()
 
 print("  ✅ Test user created → email: user@gmail.com | password: user123")
 
-# ── ML Insight for test user ──────────────────────────────
+# ── ML Insight ────────────────────────────────────────────
 MLInsight.objects.filter(user=user).delete()
 MLInsight.objects.create(
     user=user,
@@ -91,19 +93,19 @@ shopping      = Category.objects.get(key='shopping')
 utilities     = Category.objects.get(key='utilities')
 health        = Category.objects.get(key='health')
 entertainment = Category.objects.get(key='entertainment')
-savings       = Category.objects.get(key='savings')
+savings_cat   = Category.objects.get(key='savings')
 
 sample_expenses = [
-    {'description': 'Jollibee',         'category': food,          'amount': 180,  'timestamp': '2025-06-10 12:00:00'},
-    {'description': 'Grab Ride',        'category': transport,     'amount': 95,   'timestamp': '2025-06-10 08:30:00'},
-    {'description': 'SM Shopping',      'category': shopping,      'amount': 1200, 'timestamp': '2025-06-09 15:00:00'},
-    {'description': 'Meralco Bill',     'category': utilities,     'amount': 850,  'timestamp': '2025-06-09 09:00:00'},
-    {'description': 'Mercury Drug',     'category': health,        'amount': 320,  'timestamp': '2025-06-08 11:00:00'},
-    {'description': 'Netflix',          'category': entertainment, 'amount': 149,  'timestamp': '2025-06-08 20:00:00'},
-    {"description": "McDonald's",       'category': food,          'amount': 220,  'timestamp': '2025-06-07 13:00:00'},
-    {'description': 'Jeepney Fare',     'category': transport,     'amount': 30,   'timestamp': '2025-06-07 07:30:00'},
-    {'description': 'Shopee Order',     'category': shopping,      'amount': 560,  'timestamp': '2025-06-06 16:00:00'},
-    {'description': 'Savings Deposit',  'category': savings,       'amount': 1500, 'timestamp': '2025-06-06 10:00:00'},
+    {'description': 'Jollibee',        'category': food,          'amount': 180,  'timestamp': '2025-06-10 12:00:00'},
+    {'description': 'Grab Ride',       'category': transport,     'amount': 95,   'timestamp': '2025-06-10 08:30:00'},
+    {'description': 'SM Shopping',     'category': shopping,      'amount': 1200, 'timestamp': '2025-06-09 15:00:00'},
+    {'description': 'Meralco Bill',    'category': utilities,     'amount': 850,  'timestamp': '2025-06-09 09:00:00'},
+    {'description': 'Mercury Drug',    'category': health,        'amount': 320,  'timestamp': '2025-06-08 11:00:00'},
+    {'description': 'Netflix',         'category': entertainment, 'amount': 149,  'timestamp': '2025-06-08 20:00:00'},
+    {'description': "McDonald's",      'category': food,          'amount': 220,  'timestamp': '2025-06-07 13:00:00'},
+    {'description': 'Jeepney Fare',    'category': transport,     'amount': 30,   'timestamp': '2025-06-07 07:30:00'},
+    {'description': 'Shopee Order',    'category': shopping,      'amount': 560,  'timestamp': '2025-06-06 16:00:00'},
+    {'description': 'Savings Deposit', 'category': savings_cat,   'amount': 1500, 'timestamp': '2025-06-06 10:00:00'},
 ]
 
 for e in sample_expenses:
@@ -129,10 +131,10 @@ print(f"  ✅ {len(goals)} savings goals created")
 Alert.objects.filter(user=user).delete()
 
 alerts = [
-    {'type': 'warning',  'title': 'Food Spending',  'message': "You've spent 40% more on food this week"},
-    {'type': 'critical', 'title': 'Budget Risk',    'message': 'At current rate, funds may run out in 10 days'},
-    {'type': 'success',  'title': 'Savings Goal',   'message': "You're on track to meet your savings goal"},
-    {'type': 'info',     'title': 'Smart Tip',      'message': 'Reducing transport costs could save ₱600/month'},
+    {'type': 'warning',  'title': 'Food Spending', 'message': "You've spent 40% more on food this week"},
+    {'type': 'critical', 'title': 'Budget Risk',   'message': 'At current rate, funds may run out in 10 days'},
+    {'type': 'success',  'title': 'Savings Goal',  'message': "You're on track to meet your savings goal"},
+    {'type': 'info',     'title': 'Smart Tip',     'message': 'Reducing transport costs could save ₱600/month'},
 ]
 
 for a in alerts:
@@ -147,8 +149,8 @@ if not User.objects.filter(username='admin').exists():
         email='admin@spendwise.com',
         password='admin123',
     )
-    print("  ✅ Admin user created → username: admin | password: admin123")
+    print("  ✅ Admin created → username: admin | password: admin123")
 else:
-    print("  ℹ️  Admin user already exists")
+    print("  ℹ️  Admin already exists")
 
 print("\n🎉 Seeding complete!")
