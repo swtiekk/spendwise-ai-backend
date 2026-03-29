@@ -196,29 +196,67 @@ def smart_purchase_view(request):
     category    = request.data.get('category', 'other')
     description = request.data.get('description', '')
 
-    # Risk logic (mirrors your insightsService.ts)
-    if amount < 1500:
-        decision   = 'safe'
-        risk_score = int(amount / 1500 * 30)
-        reasoning  = f"₱{amount:,.2f} is within your safe spending range."
-        suggestions = ['You can proceed.', 'Log it immediately after buying.']
-    elif amount < 3000:
-        decision   = 'caution'
-        risk_score = int(30 + (amount - 1500) / 1500 * 40)
-        reasoning  = f"₱{amount:,.2f} is manageable but will reduce your remaining budget significantly."
-        suggestions = ['Only proceed if this is a priority.', 'Look for a lower-cost alternative.']
-    else:
-        decision   = 'risky'
-        risk_score = min(100, int(70 + (amount - 3000) / 1000 * 10))
-        reasoning  = f"₱{amount:,.2f} exceeds safe spending limits based on your current balance."
-        suggestions = ['Defer until next pay cycle.', 'Review your spending breakdown first.']
-
-    profile = request.user.profile
-    income  = Decimal(str(profile.income_amount))
+    # ── Get user's actual financial data ─────────────────
+    profile        = request.user.profile
+    income         = Decimal(str(profile.income_amount))
     expenses_total = Expense.objects.filter(user=request.user).aggregate(t=Sum('amount'))['t'] or Decimal('0')
-    balance = income - expenses_total
+    balance        = income - expenses_total
+    savings_goal   = Decimal(str(profile.savings_goal))
 
-    log = SmartPurchaseLog.objects.create(
+    # ── Dynamic thresholds based on user's real balance ──
+    # safe     = up to 10% of their current balance
+    # caution  = 10% to 25% of their current balance
+    # risky    = above 25% of their current balance
+    safe_threshold    = balance * Decimal('0.10')
+    caution_threshold = balance * Decimal('0.25')
+
+    if balance <= 0:
+        # user is already broke
+        decision    = 'risky'
+        risk_score  = 100
+        reasoning   = f"Your current balance is ₱{balance:,.2f}. Any purchase right now is not recommended."
+        suggestions = [
+            'You have no remaining budget.',
+            'Wait for your next income cycle.',
+            'Review and reduce existing expenses first.',
+        ]
+    elif amount <= safe_threshold:
+        decision    = 'safe'
+        risk_score  = int((amount / safe_threshold) * 30)
+        reasoning   = f"₱{amount:,.2f} is within your safe spending range based on your current balance of ₱{balance:,.2f}."
+        suggestions = [
+            'You can proceed with this purchase.',
+            'Log it immediately after buying.',
+        ]
+    elif amount <= caution_threshold:
+        decision    = 'caution'
+        risk_score  = int(30 + ((amount - safe_threshold) / (caution_threshold - safe_threshold)) * 40)
+        reasoning   = f"₱{amount:,.2f} is manageable but will use a significant portion of your ₱{balance:,.2f} balance."
+        suggestions = [
+            'Only proceed if this is a priority expense.',
+            'Look for a lower-cost alternative if possible.',
+            'Reduce spending in other categories this week.',
+        ]
+    else:
+        decision    = 'risky'
+        risk_score  = min(100, int(70 + ((amount - caution_threshold) / caution_threshold) * 30))
+        reasoning   = f"₱{amount:,.2f} exceeds 25% of your current balance of ₱{balance:,.2f}. This risks shortfall before your next income."
+        suggestions = [
+            'Defer this purchase until next pay cycle.',
+            'Check if you can find a cheaper substitute.',
+            'Review your spending breakdown to free up budget first.',
+        ]
+
+    # ── Also check if it eats into savings goal ──────────
+    remaining_after = balance - amount
+    if remaining_after < savings_goal and decision == 'safe':
+        decision   = 'caution'
+        risk_score = max(risk_score, 35)
+        reasoning += f" However, this will bring your balance below your savings goal of ₱{savings_goal:,.2f}."
+        suggestions.append('Consider your savings goal before proceeding.')
+
+    # ── Log it ────────────────────────────────────────────
+    SmartPurchaseLog.objects.create(
         user=request.user,
         amount=amount,
         category=category,
@@ -230,13 +268,15 @@ def smart_purchase_view(request):
     )
 
     return Response({
-        'decision':                   decision,
-        'risk_score':                 risk_score,
-        'reasoning':                  reasoning,
-        'suggestions':                suggestions,
-        'current_balance':            float(balance),
-        'remaining_budget':           float(balance - amount),
-        'estimated_days_until_shortfall': 3 if decision == 'risky' else None,
+        'decision':                        decision,
+        'risk_score':                      risk_score,
+        'reasoning':                       reasoning,
+        'suggestions':                     suggestions,
+        'current_balance':                 float(balance),
+        'remaining_budget':                float(balance - amount),
+        'safe_threshold':                  float(safe_threshold),
+        'caution_threshold':               float(caution_threshold),
+        'estimated_days_until_shortfall':  3 if decision == 'risky' else None,
     })
 
 
