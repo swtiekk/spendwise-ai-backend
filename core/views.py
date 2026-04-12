@@ -1,6 +1,7 @@
 from decimal import Decimal
 from django.contrib.auth.models import User
-from django.db.models import Sum
+from django.db.models import Sum, Count
+from django.db.models.functions import TruncMonth
 from rest_framework import generics, permissions, status
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
@@ -100,19 +101,18 @@ def dashboard_view(request):
     total_income   = incomes.aggregate(t=Sum('amount'))['t'] or Decimal(str(profile.income_amount))
     balance        = total_income - total_expenses
 
-    # Category breakdown
     breakdown = {}
     for exp in expenses:
         key = exp.category.key if exp.category else 'other'
         breakdown[key] = float(breakdown.get(key, 0)) + float(exp.amount)
 
     return Response({
-        'balance':            float(balance),
-        'total_expenses':     float(total_expenses),
-        'total_income':       float(total_income),
+        'balance':             float(balance),
+        'total_expenses':      float(total_expenses),
+        'total_income':        float(total_income),
         'average_daily_spend': float(total_expenses) / 30,
-        'savings_goal':       float(profile.savings_goal),
-        'category_breakdown': breakdown,
+        'savings_goal':        float(profile.savings_goal),
+        'category_breakdown':  breakdown,
     })
 
 
@@ -124,20 +124,24 @@ def expense_stats_view(request):
     expenses = Expense.objects.filter(user=user)
     profile  = user.profile
 
-    total    = expenses.aggregate(t=Sum('amount'))['t'] or Decimal('0')
-    income   = Decimal(str(profile.income_amount))
-    balance  = income - total
+    total   = expenses.aggregate(t=Sum('amount'))['t'] or Decimal('0')
+    income  = Decimal(str(profile.income_amount))
+    balance = income - total
+
     breakdown = {}
     for exp in expenses:
         key = exp.category.key if exp.category else 'other'
         breakdown[key] = float(breakdown.get(key, 0)) + float(exp.amount)
+
+    daily_spend   = float(total) / 30 if float(total) > 0 else 1
+    days_remaining = int(float(balance) / daily_spend) if daily_spend > 0 else 0
 
     return Response({
         'total_expenses':      float(total),
         'total_income':        float(income),
         'balance':             float(balance),
         'average_daily_spend': float(total) / 30,
-        'days_remaining':      14,
+        'days_remaining':      max(0, days_remaining),
         'category_breakdown':  breakdown,
     })
 
@@ -196,22 +200,16 @@ def smart_purchase_view(request):
     category    = request.data.get('category', 'other')
     description = request.data.get('description', '')
 
-    # ── Get user's actual financial data ─────────────────
     profile        = request.user.profile
     income         = Decimal(str(profile.income_amount))
     expenses_total = Expense.objects.filter(user=request.user).aggregate(t=Sum('amount'))['t'] or Decimal('0')
     balance        = income - expenses_total
     savings_goal   = Decimal(str(profile.savings_goal))
 
-    # ── Dynamic thresholds based on user's real balance ──
-    # safe     = up to 10% of their current balance
-    # caution  = 10% to 25% of their current balance
-    # risky    = above 25% of their current balance
     safe_threshold    = balance * Decimal('0.10')
     caution_threshold = balance * Decimal('0.25')
 
     if balance <= 0:
-        # user is already broke
         decision    = 'risky'
         risk_score  = 100
         reasoning   = f"Your current balance is ₱{balance:,.2f}. Any purchase right now is not recommended."
@@ -247,7 +245,6 @@ def smart_purchase_view(request):
             'Review your spending breakdown to free up budget first.',
         ]
 
-    # ── Also check if it eats into savings goal ──────────
     remaining_after = balance - amount
     if remaining_after < savings_goal and decision == 'safe':
         decision   = 'caution'
@@ -255,7 +252,6 @@ def smart_purchase_view(request):
         reasoning += f" However, this will bring your balance below your savings goal of ₱{savings_goal:,.2f}."
         suggestions.append('Consider your savings goal before proceeding.')
 
-    # ── Log it ────────────────────────────────────────────
     SmartPurchaseLog.objects.create(
         user=request.user,
         amount=amount,
@@ -268,15 +264,15 @@ def smart_purchase_view(request):
     )
 
     return Response({
-        'decision':                        decision,
-        'risk_score':                      risk_score,
-        'reasoning':                       reasoning,
-        'suggestions':                     suggestions,
-        'current_balance':                 float(balance),
-        'remaining_budget':                float(balance - amount),
-        'safe_threshold':                  float(safe_threshold),
-        'caution_threshold':               float(caution_threshold),
-        'estimated_days_until_shortfall':  3 if decision == 'risky' else None,
+        'decision':                       decision,
+        'risk_score':                     risk_score,
+        'reasoning':                      reasoning,
+        'suggestions':                    suggestions,
+        'current_balance':                float(balance),
+        'remaining_budget':               float(balance - amount),
+        'safe_threshold':                 float(safe_threshold),
+        'caution_threshold':              float(caution_threshold),
+        'estimated_days_until_shortfall': 3 if decision == 'risky' else None,
     })
 
 
@@ -313,7 +309,54 @@ def admin_dashboard_view(request):
         cluster_counts[insight.user_cluster] = cluster_counts.get(insight.user_cluster, 0) + 1
 
     return Response({
-        'total_users':    total_users,
-        'total_expenses': float(total_expenses),
+        'total_users':          total_users,
+        'total_expenses':       float(total_expenses),
         'cluster_distribution': cluster_counts,
     })
+
+
+@api_view(['GET'])
+@permission_classes([permissions.IsAdminUser])
+def admin_reports_view(request):
+    # Group expenses by month
+    monthly = (
+        Expense.objects
+        .annotate(month=TruncMonth('timestamp'))
+        .values('month')
+        .annotate(
+            total_spend=Sum('amount'),
+            user_count=Count('user', distinct=True),
+        )
+        .order_by('month')
+    )
+
+    # Get top category per month
+    data = []
+    for row in monthly:
+        month_dt  = row['month']
+        total     = float(row['total_spend'] or 0)
+        users     = row['user_count'] or 0
+        avg       = total / users if users > 0 else 0
+
+        # Find top category for this month
+        top_cat_row = (
+            Expense.objects
+            .filter(timestamp__year=month_dt.year, timestamp__month=month_dt.month)
+            .values('category__name')
+            .annotate(cat_total=Sum('amount'))
+            .order_by('-cat_total')
+            .first()
+        )
+        top_category = top_cat_row['category__name'] if top_cat_row else 'N/A'
+
+        data.append({
+            'month':      month_dt.strftime('%b %Y'),
+            'users':      users,
+            'totalSpend': f"₱{total:,.2f}",
+            'avgSpend':   f"₱{avg:,.2f}",
+            'alerts':     0,
+            'savings':    "₱0.00",
+            'topCategory': top_category,
+        })
+
+    return Response(data)
